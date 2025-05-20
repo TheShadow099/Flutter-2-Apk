@@ -1,0 +1,65 @@
+name: Flutter 2 Apk Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      captcha:
+        description: 'Enter the 4-digit code shown above'
+        required: true
+
+jobs:
+  validate_and_build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check for correct captcha
+      run: |
+        CAPTCHA=$(ls upload_project_here/*.zip | sha1sum | cut -c1-4)
+        echo "Expected CAPTCHA: $CAPTCHA"
+        if [ "${{ github.event.inputs.captcha }}" != "$CAPTCHA" ]; then
+          echo "❌ Incorrect code entered!"
+          exit 1
+        fi
+
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.19.6'
+
+    - name: Find and unzip uploaded project
+      run: |
+        ZIP_FILE=$(ls upload_project_here/*.zip | head -n 1)
+        echo "Found ZIP: $ZIP_FILE"
+        unzip "$ZIP_FILE" -d project
+
+    - name: Create android/ folder
+      run: |
+        cd project
+        flutter create .
+        cp -r ../project/* ./
+
+    - name: Install dependencies
+      run: cd project && flutter pub get
+
+    - name: Build APK
+      run: cd project && flutter build apk --release
+
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: built-apk
+        path: project/build/app/outputs/flutter-apk/app-release.apk
+
+    - name: Show success message
+      run: echo "✅ Build completed! APK is available for 20 minutes."
+
+  cleanup:
+    needs: validate_and_build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Sleep for 20 minutes then delete ZIP & APK
+      run: |
+        echo "Sleeping for 20 minutes..."
+        sleep 1200
+        echo "Cleaning up files..."
+        find upload_project_here/ -name '*.zip' -delete || true
+        rm -rf project || true

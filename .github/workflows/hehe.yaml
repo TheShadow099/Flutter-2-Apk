@@ -32,7 +32,7 @@ jobs:
 
     - name: Find and unzip uploaded project
       run: |
-        ZIP_FILE=$(ls upload_project_here/tap_the_square_game | head -n 1)
+        ZIP_FILE=$(ls upload_project_here/tap_the_square_game.zip | head -n 1)
         echo "Found ZIP: $ZIP_FILE"
         unzip "$ZIP_FILE" -d project
 

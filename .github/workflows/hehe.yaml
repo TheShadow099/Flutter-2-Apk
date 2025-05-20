@@ -4,24 +4,20 @@ on:
   workflow_dispatch:
     inputs:
       captcha:
-        description: 'Enter the 4-digit code shown above'
+        description: 'Enter the code 1234 to continue'
         required: true
+
+permissions:
+  contents: write
 
 jobs:
   validate_and_build:
     runs-on: ubuntu-latest
     steps:
-    - name: Show available ZIP files
-      run: ls -l upload_project_here || echo "No zip file found."
-
-    - name: Check for correct captcha (numeric based on filename)
+    - name: Validate static CAPTCHA
       run: |
-        FILE=$(ls upload_project_here/*.zip | head -n 1)
-        FILENAME=$(basename "$FILE")
-        CAPTCHA=$(echo -n "$FILENAME" | cksum | cut -d ' ' -f1 | cut -c1-4)
-        echo "Expected CAPTCHA: $CAPTCHA"
-        if [ "${{ github.event.inputs.captcha }}" != "$CAPTCHA" ]; then
-          echo "❌ Incorrect code entered!"
+        if [ "${{ github.event.inputs.captcha }}" != "1234" ]; then
+          echo "❌ Incorrect CAPTCHA! Please enter 1234."
           exit 1
         fi
 
@@ -30,9 +26,13 @@ jobs:
       with:
         flutter-version: '3.19.6'
 
-    - name: Find and unzip uploaded project
+    - name: Extract uploaded Flutter project
       run: |
-        ZIP_FILE=$(ls upload_project_here/tap_the_square_game.zip | head -n 1)
+        ZIP_FILE=$(find upload_project_here -maxdepth 1 -name '*.zip' | head -n 1)
+        if [ -z "$ZIP_FILE" ]; then
+          echo "❌ No ZIP file found in upload_project_here/"
+          exit 1
+        fi
         echo "Found ZIP: $ZIP_FILE"
         unzip "$ZIP_FILE" -d project
 
@@ -42,29 +42,29 @@ jobs:
         flutter create .
         cp -r ../project/* ./
 
-    - name: Install dependencies
+    - name: Get dependencies
       run: cd project && flutter pub get
 
     - name: Build APK
       run: cd project && flutter build apk --release
 
-    - name: Upload APK
+    - name: Upload APK artifact
       uses: actions/upload-artifact@v4
       with:
         name: built-apk
         path: project/build/app/outputs/flutter-apk/app-release.apk
 
-    - name: Show success message
-      run: echo "✅ Build completed! APK is available for 20 minutes."
+    - name: Notify success
+      run: echo "✅ APK build complete! It will be auto-deleted after 20 minutes."
 
   cleanup:
     needs: validate_and_build
     runs-on: ubuntu-latest
     steps:
-    - name: Sleep for 20 minutes then delete ZIP & APK
+    - name: Wait and clean up
       run: |
-        echo "Sleeping for 20 minutes..."
+        echo "Waiting 20 minutes before cleanup..."
         sleep 1200
-        echo "Cleaning up files..."
-        find upload_project_here/ -name '*.zip' -delete || true
-        rm -rf project || true
+        echo "Cleaning up ZIP and build files..."
+        rm -rf upload_project_here/*.zip
+        rm -rf project

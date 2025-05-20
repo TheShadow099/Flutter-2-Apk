@@ -11,9 +11,14 @@ jobs:
   validate_and_build:
     runs-on: ubuntu-latest
     steps:
-    - name: Check for correct captcha
+    - name: Show available ZIP files
+      run: ls -l upload_project_here || echo "No zip file found."
+
+    - name: Check for correct captcha (numeric based on filename)
       run: |
-        CAPTCHA=$(ls upload_project_here/*.zip | sha1sum | cut -c1-4)
+        FILE=$(ls upload_project_here/*.zip | head -n 1)
+        FILENAME=$(basename "$FILE")
+        CAPTCHA=$(echo -n "$FILENAME" | cksum | cut -d ' ' -f1 | cut -c1-4)
         echo "Expected CAPTCHA: $CAPTCHA"
         if [ "${{ github.event.inputs.captcha }}" != "$CAPTCHA" ]; then
           echo "❌ Incorrect code entered!"

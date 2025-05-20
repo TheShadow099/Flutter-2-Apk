@@ -1,3 +1,45 @@
+name: Build Customized APK from Uploaded Project
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_filename:
+        description: 'Name of the project zip file in uploads/ (e.g., my_project.zip). Must contain lib/, pubspec.yaml at root or in a single top-level subfolder.'
+        required: true
+        default: 'project.zip'
+      app_name:
+        description: 'Desired App Display Name (e.g., My Cool App)'
+        required: true
+        default: 'FlutterApp'
+      package_name:
+        description: 'Desired Package Name (e.g., com.mycompany.mycoolapp)'
+        required: true
+        default: 'com.example.flutterapp'
+      icon_filename:
+        description: 'Filename of the app icon (e.g., app_icon.png) uploaded to the uploads/ folder.'
+        required: true
+        default: 'default.png' # Ensure uploads/default.png exists if using this default
+
+jobs:
+  build-from-zip:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu' # Or temurin, adopt
+          java-version: '17'   # Or your project's Java version requirement (e.g., 11)
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.16.9' # Specify your desired Flutter version
+          # channel: 'stable' # Or specify a channel
+
       - name: Prepare and Customize Project
         id: prepare_project
         run: |
@@ -216,3 +258,109 @@
           echo "::set-output name=project_path::$(pwd)" # $(pwd) is currently $GITHUB_WORKSPACE/$TEMP_BUILD_DIR
           cd "$GITHUB_WORKSPACE" # Navigate back to GITHUB_WORKSPACE root
           echo "Project preparation and customization complete. Buildable project is in $(pwd)/$TEMP_BUILD_DIR"
+
+      - name: Build APK
+        run: |
+          PROJECT_TO_BUILD="${{ steps.prepare_project.outputs.project_path }}" # This is an absolute path
+          echo "Building APK in $PROJECT_TO_BUILD..."
+          cd "$PROJECT_TO_BUILD" # Change into the prepared project directory
+          flutter clean # Good practice before a release build
+          flutter build apk --release --no-shrink # --no-shrink can help if R8 causes issues initially
+          if [ $? -ne 0 ]; then
+            echo "::error::Flutter build APK failed."
+            # Helpful to see what's (or not) in the output dir
+            echo "Listing contents of build/app/outputs/flutter-apk/ (if exists):"
+            ls -R build/app/outputs/flutter-apk/ || true
+            echo "Listing contents of build/app/outputs/apk/release/ (if exists):"
+            ls -R build/app/outputs/apk/release/ || true
+            exit 1
+          fi
+          cd "$GITHUB_WORKSPACE" # Back to repository root for next steps
+          echo "APK build successful."
+
+      - name: Move APK to builds folder and Set Output
+        id: move_apk
+        run: |
+          PROJECT_BUILT_PATH="${{ steps.prepare_project.outputs.project_path }}" # Absolute path to .../temp_flutter_build_shell
+          
+          # Create a sanitized app name for the APK filename
+          DESIRED_APP_NAME_SLUG=$(echo "${{ github.event.inputs.app_name }}" | tr -s '[:space:]' '_' | tr -dc '[:alnum:]_.-')
+          APK_FILENAME="${DESIRED_APP_NAME_SLUG:-app}-run-${{ github.run_number }}.apk" # Removed 'release' for brevity
+          
+          # Define potential APK source paths within the $PROJECT_BUILT_PATH
+          APK_SOURCE_PATH_PRIMARY="$PROJECT_BUILT_PATH/build/app/outputs/flutter-apk/app-release.apk"
+          APK_SOURCE_PATH_ALTERNATIVE="$PROJECT_BUILT_PATH/build/app/outputs/apk/release/app-release.apk"
+          ACTUAL_APK_SOURCE_PATH=""
+
+          if [ -f "$APK_SOURCE_PATH_PRIMARY" ]; then
+            ACTUAL_APK_SOURCE_PATH="$APK_SOURCE_PATH_PRIMARY"
+          elif [ -f "$APK_SOURCE_PATH_ALTERNATIVE" ]; then
+            ACTUAL_APK_SOURCE_PATH="$APK_SOURCE_PATH_ALTERNATIVE"
+          else
+            echo "::error::Release APK not found at expected paths after build."
+            echo "Searched for: $APK_SOURCE_PATH_PRIMARY"
+            echo "And for:      $APK_SOURCE_PATH_ALTERNATIVE"
+            echo "Contents of $PROJECT_BUILT_PATH/build/app/outputs/ :"
+            ls -R "$PROJECT_BUILT_PATH/build/app/outputs/" || echo "Outputs directory not found."
+            exit 1
+          fi
+          
+          # Destination path for the APK in the repository's 'builds' folder
+          DEST_APK_REPO_PATH="builds/$APK_FILENAME" # Relative to GITHUB_WORKSPACE
+
+          echo "Moving APK from $ACTUAL_APK_SOURCE_PATH to $GITHUB_WORKSPACE/$DEST_APK_REPO_PATH"
+          mkdir -p "$GITHUB_WORKSPACE/builds" # Ensure 'builds' directory exists at repo root
+          mv "$ACTUAL_APK_SOURCE_PATH" "$GITHUB_WORKSPACE/$DEST_APK_REPO_PATH"
+          if [ $? -ne 0 ]; then
+            echo "::error::Failed to move APK."
+            exit 1
+          fi
+          echo "APK moved to $DEST_APK_REPO_PATH"
+          
+          # Set outputs for the commit step (paths relative to GITHUB_WORKSPACE)
+          echo "::set-output name=apk_path_in_repo::$DEST_APK_REPO_PATH"
+          echo "::set-output name=apk_filename::$APK_FILENAME"
+
+      - name: Commit and Push APK
+        run: |
+          # Path from previous step's output, already relative to GITHUB_WORKSPACE
+          APK_FILE_TO_COMMIT="${{ steps.move_apk.outputs.apk_path_in_repo }}"
+          APK_NAME_FOR_COMMIT="${{ steps.move_apk.outputs.apk_filename }}"
+
+          git config --global user.name 'GitHub Actions Bot'
+          git config --global user.email 'actions@github.com' # Common practice for bot email
+          
+          echo "Attempting to add $APK_FILE_TO_COMMIT to git staging area."
+          git add "$APK_FILE_TO_COMMIT"
+          
+          # Check if there are staged changes specifically for the APK
+          if git diff --staged --quiet -- "$APK_FILE_TO_COMMIT"; then
+            echo "No changes to APK file '$APK_FILE_TO_COMMIT' or file not staged. Skipping commit."
+            # If the file should exist, this might indicate an issue.
+            if [ ! -f "$APK_FILE_TO_COMMIT" ]; then
+                echo "::error::APK file $APK_FILE_TO_COMMIT not found for commit. Move step might have failed."
+                exit 1
+            fi
+          else
+            echo "Committing APK: $APK_NAME_FOR_COMMIT"
+            git commit -m "feat: Add APK build for ${{ github.event.inputs.app_name }} - $APK_NAME_FOR_COMMIT (Run ${{ github.run_number }})"
+            
+            echo "Pushing changes to the repository..."
+            git push
+            echo "APK committed and pushed."
+          fi
+
+      - name: Cleanup Temporary Dirs
+        if: always() # Always run cleanup, even if previous steps fail
+        run: |
+          echo "Cleaning up temporary directories..."
+          # These directories were created at the GITHUB_WORKSPACE level
+          if [ -d "$GITHUB_WORKSPACE/temp_project_sources" ]; then
+            rm -rf "$GITHUB_WORKSPACE/temp_project_sources"
+            echo "Removed $GITHUB_WORKSPACE/temp_project_sources"
+          fi
+          if [ -d "$GITHUB_WORKSPACE/temp_flutter_build_shell" ]; then
+            rm -rf "$GITHUB_WORKSPACE/temp_flutter_build_shell"
+            echo "Removed $GITHUB_WORKSPACE/temp_flutter_build_shell"
+          fi
+          echo "Cleanup complete."

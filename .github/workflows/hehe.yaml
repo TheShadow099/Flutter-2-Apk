@@ -1,70 +1,249 @@
-name: Flutter 2 Apk Builder
+name: Build Customized APK from Uploaded Project
 
 on:
   workflow_dispatch:
     inputs:
-      captcha:
-        description: 'Enter the code 1234 to continue'
+      zip_filename:
+        description: 'Name of the project zip file in uploads/ (e.g., my_project.zip)'
         required: true
-
-permissions:
-  contents: write
+        default: 'project.zip'
+      app_name:
+        description: 'Desired App Name (e.g., My Cool App)'
+        required: true
+        default: 'FlutterApp'
+      package_name:
+        description: 'Desired Package Name (e.g., com.mycompany.mycoolapp)'
+        required: true
+        default: 'com.example.flutterapp'
+      icon_filename:
+        description: 'Filename of the app icon (e.g., app_icon.png) uploaded to the uploads/ folder. Must be a valid image.'
+        required: true
+        default: 'default.png' # Ensure you have a default.png in uploads/ if this is used
 
 jobs:
-  validate_and_build:
+  build-from-zip:
     runs-on: ubuntu-latest
+
     steps:
-    - name: Validate static CAPTCHA
-      run: |
-        if [ "${{ github.event.inputs.captcha }}" != "1234" ]; then
-          echo "❌ Incorrect CAPTCHA! Please enter 1234."
-          exit 1
-        fi
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Setup Flutter
-      uses: subosito/flutter-action@v2
-      with:
-        flutter-version: '3.19.6'
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17' # Or your project's requirement
 
-    - name: Extract uploaded Flutter project
-      run: |
-        ZIP_FILE=$(find upload_project_here -maxdepth 1 -name '*.zip' | head -n 1)
-        if [ -z "$ZIP_FILE" ]; then
-          echo "❌ No ZIP file found in upload_project_here/"
-          exit 1
-        fi
-        echo "Found ZIP: $ZIP_FILE"
-        unzip "$ZIP_FILE" -d project
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.16.9' # Or your desired version
+          # channel: 'stable'
 
-    - name: Create android/ folder
-      run: |
-        cd project
-        flutter create .
-        cp -r ../project/* ./
+      - name: Prepare Project from Zip
+        id: prepare_project
+        run: |
+          UPLOADED_ZIP_PATH="uploads/${{ github.event.inputs.zip_filename }}"
+          TEMP_PROJECT_DIR="temp_flutter_project_build"
 
-    - name: Get dependencies
-      run: cd project && flutter pub get
+          if [ ! -f "$UPLOADED_ZIP_PATH" ]; then
+            echo "::error::Zip file '$UPLOADED_ZIP_PATH' not found in the uploads/ directory."
+            exit 1
+          fi
 
-    - name: Build APK
-      run: cd project && flutter build apk --release
+          echo "Creating temporary project directory: $TEMP_PROJECT_DIR"
+          mkdir "$TEMP_PROJECT_DIR"
 
-    - name: Upload APK artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: built-apk
-        path: project/build/app/outputs/flutter-apk/app-release.apk
+          echo "Unzipping $UPLOADED_ZIP_PATH into $TEMP_PROJECT_DIR..."
+          unzip "$UPLOADED_ZIP_PATH" -d "$TEMP_PROJECT_DIR"
+          if [ $? -ne 0 ]; then
+            echo "::error::Failed to unzip $UPLOADED_ZIP_PATH."
+            exit 1
+          fi
+          cd "$TEMP_PROJECT_DIR"
 
-    - name: Notify success
-      run: echo "✅ APK build complete! It will be auto-deleted after 20 minutes."
+          # ---- Modification: Use inputs for flutter create ----
+          # Extract parts for flutter create
+          # For package com.example.appname, org is com.example, project_name is appname
+          # This is a robust way to set package name from the start.
+          DESIRED_PACKAGE_NAME="${{ github.event.inputs.package_name }}"
+          PROJECT_NAME_FROM_PACKAGE=$(echo "$DESIRED_PACKAGE_NAME" | awk -F. '{print $NF}')
+          ORG_FROM_PACKAGE=$(echo "$DESIRED_PACKAGE_NAME" | sed "s/\.$PROJECT_NAME_FROM_PACKAGE$//")
 
-  cleanup:
-    needs: validate_and_build
-    runs-on: ubuntu-latest
-    steps:
-    - name: Wait and clean up
-      run: |
-        echo "Waiting 20 minutes before cleanup..."
-        sleep 1200
-        echo "Cleaning up ZIP and build files..."
-        rm -rf upload_project_here/*.zip
-        rm -rf project
+          echo "Regenerating platform-specific files for Android..."
+          echo "Using Org: $ORG_FROM_PACKAGE, Project Name: $PROJECT_NAME_FROM_PACKAGE"
+          # Note: flutter create will use PROJECT_NAME_FROM_PACKAGE as the folder name if used in an empty dir
+          # Since we're in an existing dir with project files, it will use these inputs for package/applicationId
+          flutter create --platforms=android --org "$ORG_FROM_PACKAGE" --project-name "$PROJECT_NAME_FROM_PACKAGE" .
+          if [ $? -ne 0 ]; then
+            echo "::error::Failed to run 'flutter create .'."
+            exit 1
+          fi
+          # ------------------------------------------------------
+
+          echo "Getting Flutter dependencies..."
+          flutter pub get
+          if [ $? -ne 0 ]; then
+            echo "::error::Failed to run 'flutter pub get'."
+            exit 1
+          fi
+
+          echo "::set-output name=project_path::$TEMP_PROJECT_DIR"
+          cd .. # Go back to the repository root
+          echo "Project preparation complete. Project is in $TEMP_PROJECT_DIR"
+
+      - name: Customize Project Files
+        run: |
+          PROJECT_PATH="${{ steps.prepare_project.outputs.project_path }}"
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          # Package name is already handled by `flutter create --org --project-name`
+          # PACKAGE_NAME="${{ github.event.inputs.package_name }}"
+          ICON_FILENAME="${{ github.event.inputs.icon_filename }}"
+          UPLOADED_ICON_PATH="../../uploads/$ICON_FILENAME" # Relative to $PROJECT_PATH
+
+          cd "$PROJECT_PATH"
+          echo "Current directory: $(pwd)"
+
+          # 1. Change App Name in AndroidManifest.xml
+          MANIFEST_FILE="android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST_FILE" ]; then
+            echo "Updating app name to '$APP_NAME' in $MANIFEST_FILE"
+            # This sed command looks for android:label="..." and replaces its value.
+            # It's safer for XML to use a proper XML tool, but sed is often okay for this.
+            sed -i.bak "s|android:label=\"[^\"]*\"|android:label=\"$APP_NAME\"|g" "$MANIFEST_FILE"
+            if grep "android:label=\"$APP_NAME\"" "$MANIFEST_FILE"; then
+              echo "App name updated successfully."
+            else
+              echo "::warning::Failed to update app name in $MANIFEST_FILE. Check sed command and file content."
+            fi
+          else
+            echo "::error::$MANIFEST_FILE not found."
+            exit 1
+          fi
+
+          # 2. Replace Launcher Icon
+          # User uploads icon to repo's 'uploads/' folder.
+          # We copy it to the standard Android mipmap directories.
+          if [ -f "$UPLOADED_ICON_PATH" ]; then
+            echo "Replacing launcher icons with $UPLOADED_ICON_PATH"
+            ICON_TARGET_BASE="android/app/src/main/res"
+            declare -a MIPMAP_DIRS=("mipmap-mdpi" "mipmap-hdpi" "mipmap-xhdpi" "mipmap-xxhdpi" "mipmap-xxxhdpi")
+
+            for dir in "${MIPMAP_DIRS[@]}"; do
+              if [ -d "$ICON_TARGET_BASE/$dir" ]; then
+                echo "Copying icon to $ICON_TARGET_BASE/$dir/ic_launcher.png"
+                cp "$UPLOADED_ICON_PATH" "$ICON_TARGET_BASE/$dir/ic_launcher.png"
+                # For adaptive icons, you might also need ic_launcher_round.png and foreground/background layers
+                # This simple version just replaces the main ic_launcher.png
+                if [ -f "$ICON_TARGET_BASE/$dir/ic_launcher_round.png" ]; then
+                    echo "Copying icon to $ICON_TARGET_BASE/$dir/ic_launcher_round.png"
+                    cp "$UPLOADED_ICON_PATH" "$ICON_TARGET_BASE/$dir/ic_launcher_round.png"
+                fi
+              else
+                echo "::warning::Directory $ICON_TARGET_BASE/$dir not found. Skipping icon copy for this density."
+              fi
+            done
+            echo "Launcher icons updated. Ensure your uploaded icon is suitable for all densities or use flutter_launcher_icons for proper generation."
+          else
+            echo "::warning::Icon file '$UPLOADED_ICON_PATH' (resolved from 'uploads/$ICON_FILENAME') not found. Skipping icon replacement."
+            # If default.png is critical, you might want to make this an error:
+            # if [ "$ICON_FILENAME" == "default.png" ]; then
+            #   echo "::error::Default icon 'default.png' not found in uploads/. Please upload it."
+            #   exit 1
+            # fi
+          fi
+
+          # Note: Package name change is now primarily handled by `flutter create --org ... --project-name ...`
+          # The `applicationId` in `build.gradle` should be correct.
+          # The MainActivity.kt/java path should also be correct.
+          # Let's verify the applicationId in build.gradle for safety
+          BUILD_GRADLE_FILE="android/app/build.gradle"
+          DESIRED_PACKAGE_NAME="${{ github.event.inputs.package_name }}"
+          if grep "applicationId \"$DESIRED_PACKAGE_NAME\"" "$BUILD_GRADLE_FILE"; then
+            echo "Package name (applicationId) in build.gradle confirmed: $DESIRED_PACKAGE_NAME"
+          else
+            echo "::warning::Desired package name $DESIRED_PACKAGE_NAME not found as applicationId in $BUILD_GRADLE_FILE."
+            echo "This might indicate an issue with 'flutter create' or the project structure."
+            echo "Contents of defaultConfig in build.gradle:"
+            sed -n '/defaultConfig {/,/}/p' "$BUILD_GRADLE_FILE"
+          fi
+
+          cd ../.. # Back to repository root
+          echo "Project customization complete."
+
+      - name: Build APK
+        run: |
+          PROJECT_PATH="${{ steps.prepare_project.outputs.project_path }}"
+          echo "Building APK in $PROJECT_PATH..."
+          cd "$PROJECT_PATH"
+          flutter build apk --release
+          if [ $? -ne 0 ]; then
+            echo "::error::Flutter build APK failed."
+            exit 1
+          fi
+          cd ..
+          echo "APK build successful."
+
+      - name: Move APK to builds folder and Set Output
+        id: move_apk
+        run: |
+          PROJECT_PATH="${{ steps.prepare_project.outputs.project_path }}"
+          # Use the app name input for the APK filename for better identification
+          DESIRED_APP_NAME_SLUG=$(echo "${{ github.event.inputs.app_name }}" | tr -s '[:space:]' '_' | tr -dc '[:alnum:]_-')
+          APK_NAME="${DESIRED_APP_NAME_SLUG:-app}-release-run-${{ github.run_number }}.apk"
+          
+          APK_SOURCE_PATH_PRIMARY="$PROJECT_PATH/build/app/outputs/flutter-apk/app-release.apk"
+          APK_SOURCE_PATH_ALTERNATIVE="$PROJECT_PATH/build/app/outputs/apk/release/app-release.apk"
+          APK_SOURCE_PATH=""
+
+          if [ -f "$APK_SOURCE_PATH_PRIMARY" ]; then
+            APK_SOURCE_PATH="$APK_SOURCE_PATH_PRIMARY"
+          elif [ -f "$APK_SOURCE_PATH_ALTERNATIVE" ]; then
+            APK_SOURCE_PATH="$APK_SOURCE_PATH_ALTERNATIVE"
+          else
+            echo "::error::Release APK not found at expected paths."
+            echo "Searched in: $APK_SOURCE_PATH_PRIMARY"
+            echo "And in: $APK_SOURCE_PATH_ALTERNATIVE"
+            echo "Listing contents of $PROJECT_PATH/build/app/outputs/:"
+            ls -R "$PROJECT_PATH/build/app/outputs/"
+            exit 1
+          fi
+          
+          DEST_APK_PATH="builds/$APK_NAME"
+
+          echo "Moving APK from $APK_SOURCE_PATH to $DEST_APK_PATH"
+          mkdir -p builds
+          mv "$APK_SOURCE_PATH" "$DEST_APK_PATH"
+          if [ $? -ne 0 ]; then
+            echo "::error::Failed to move APK."
+            exit 1
+          fi
+          echo "APK moved to $DEST_APK_PATH"
+          echo "::set-output name=apk_path::$DEST_APK_PATH"
+          echo "::set-output name=apk_name::$APK_NAME"
+
+      - name: Commit and Push APK
+        run: |
+          APK_FILE_TO_COMMIT="${{ steps.move_apk.outputs.apk_path }}"
+          APK_NAME_FOR_COMMIT="${{ steps.move_apk.outputs.apk_name }}"
+
+          git config --global user.name 'GitHub Actions Bot'
+          git config --global user.email 'github-actions-bot@users.noreply.github.com'
+          git add "$APK_FILE_TO_COMMIT"
+          if git diff --staged --quiet; then
+            echo "No changes to commit for APK."
+          else
+            git commit -m "feat: Add APK for ${{ github.event.inputs.app_name }} (Run ${{ github.run_number }})"
+            # Ensure the bot has push permissions. You might need to use a PAT if default GITHUB_TOKEN permissions are restricted.
+            git push
+            echo "APK committed and pushed."
+          fi
+
+      - name: Cleanup Temporary Project
+        if: always()
+        run: |
+          PROJECT_PATH="${{ steps.prepare_project.outputs.project_path }}"
+          if [ -d "$PROJECT_PATH" ]; then
+            echo "Cleaning up temporary project directory: $PROJECT_PATH"
+            rm -rf "$PROJECT_PATH"
+          fi

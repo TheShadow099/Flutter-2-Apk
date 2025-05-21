@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       zip_filename:
-        description: 'Name of the project zip file in uploads/ (e.g., my_project.zip). Must contain lib/, pubspec.yaml at root or in a single top-level subfolder.'
+        description: 'Name of the Project zip file in uploads.'
         required: true
-        default: 'project.zip'
+        default: 'Project.zip'
       app_name:
-        description: 'Desired App Display Name (e.g., My Cool App)'
+        description: 'Write Down The App Name (e.g., My Cool App)'
         required: true
         default: 'FlutterApp'
       package_name:
@@ -37,7 +37,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.16.9' # Specify your desired Flutter version
+          flutter-version: '3.22.2' # Specify your desired Flutter version
           # channel: 'stable' # Or specify a channel
 
       - name: Prepare and Customize Project

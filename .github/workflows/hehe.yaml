@@ -69,148 +69,94 @@ jobs:
           ls -la "$GITHUB_WORKSPACE/$TEMP_UNZIPPED_DIR_ROOT"
 
           echo "=== Phase 2: Determining Actual Project Source Directory ==="
-          # Path relative to $TEMP_BUILD_DIR for cp commands later.
-          # Default assumes files are directly in $TEMP_UNZIPPED_DIR_ROOT.
           ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY="../$TEMP_UNZIPPED_DIR_ROOT"
-          
-          # Path for checking pubspec.yaml at the root of unzipped content (absolute)
           PUBSPEC_CHECK_PATH_AT_UNZIP_ROOT="$GITHUB_WORKSPACE/$TEMP_UNZIPPED_DIR_ROOT/pubspec.yaml"
 
-          echo "Debug: Checking for pubspec.yaml directly at: $PUBSPEC_CHECK_PATH_AT_UNZIP_ROOT"
           if [ ! -f "$PUBSPEC_CHECK_PATH_AT_UNZIP_ROOT" ]; then
-            echo "Debug: pubspec.yaml NOT found directly in $TEMP_UNZIPPED_DIR_ROOT. Searching in subdirectories..."
-            
             CANDIDATE_SUBDIRS_FOUND_COUNT=0
-            FOUND_PROJECT_IN_SUBDIR_ABS_PATH="" # Store absolute path of found project dir
-            
-            shopt -s nullglob # Expands to nothing if no matches, safer for loops
-            # Loop through immediate subdirectories of TEMP_UNZIPPED_DIR_ROOT
+            FOUND_PROJECT_IN_SUBDIR_ABS_PATH=""
+            shopt -s nullglob
             for item_abs_path in "$GITHUB_WORKSPACE/$TEMP_UNZIPPED_DIR_ROOT"/*/; do
-                # item_abs_path will have a trailing slash, remove it for cleaner paths
                 local_item_abs_path_no_slash="${item_abs_path%/}"
-                echo "Debug: Evaluating candidate subdirectory (absolute): $local_item_abs_path_no_slash"
                 CANDIDATE_SUBDIRS_FOUND_COUNT=$((CANDIDATE_SUBDIRS_FOUND_COUNT + 1))
-                
                 PUBSPEC_IN_SUBDIR_CHECK_PATH="$local_item_abs_path_no_slash/pubspec.yaml"
-                echo "Debug: Checking for pubspec.yaml at: $PUBSPEC_IN_SUBDIR_CHECK_PATH"
                 if [ -f "$PUBSPEC_IN_SUBDIR_CHECK_PATH" ]; then
-                  echo "Debug: SUCCESS - Found pubspec.yaml in $local_item_abs_path_no_slash"
                   if [ -z "$FOUND_PROJECT_IN_SUBDIR_ABS_PATH" ]; then
                     FOUND_PROJECT_IN_SUBDIR_ABS_PATH="$local_item_abs_path_no_slash"
                   else
-                    echo "::error::Ambiguity: Found pubspec.yaml in multiple subdirectories within $TEMP_UNZIPPED_DIR_ROOT."
-                    echo "Found in: $FOUND_PROJECT_IN_SUBDIR_ABS_PATH and also in $local_item_abs_path_no_slash"
-                    ls -R "$GITHUB_WORKSPACE/$TEMP_UNZIPPED_DIR_ROOT"
+                    echo "::error::Ambiguity: Found pubspec.yaml in multiple subdirectories."
                     exit 1
                   fi
-                else
-                  echo "Debug: pubspec.yaml NOT found in $local_item_abs_path_no_slash"
                 fi
             done
-            shopt -u nullglob # Reset shell option
-
+            shopt -u nullglob
             if [ -n "$FOUND_PROJECT_IN_SUBDIR_ABS_PATH" ]; then
-              echo "Debug: Project source successfully identified in subdirectory: $FOUND_PROJECT_IN_SUBDIR_ABS_PATH"
               PROJECT_SUBFOLDER_NAME=$(basename "$FOUND_PROJECT_IN_SUBDIR_ABS_PATH")
               ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY="../$TEMP_UNZIPPED_DIR_ROOT/$PROJECT_SUBFOLDER_NAME"
             elif [ "$CANDIDATE_SUBDIRS_FOUND_COUNT" -gt 0 ]; then
-                 echo "::error::Checked $CANDIDATE_SUBDIRS_FOUND_COUNT subdirectory/ies in $TEMP_UNZIPPED_DIR_ROOT, but pubspec.yaml was not found in any of them."
-                 ls -R "$GITHUB_WORKSPACE/$TEMP_UNZIPPED_DIR_ROOT"
+                 echo "::error::Checked subdirectories, but pubspec.yaml not found."
                  exit 1
             else
-                 echo "::error::pubspec.yaml not found directly in $TEMP_UNZIPPED_DIR_ROOT and no subdirectories were present to check."
-                 ls -R "$GITHUB_WORKSPACE/$TEMP_UNZIPPED_DIR_ROOT"
+                 echo "::error::pubspec.yaml not found directly and no subdirectories present."
                  exit 1
             fi
-          else
-            echo "Debug: pubspec.yaml found directly in $TEMP_UNZIPPED_DIR_ROOT. Using it as the project source base."
-            # ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY is already correctly set to ../$TEMP_UNZIPPED_DIR_ROOT
           fi
-          echo "Debug: Effective project source base for copying (relative to build shell) will be: $ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY"
+          echo "Effective project source base for copying: $ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY"
 
           echo "=== Phase 3: Creating Flutter Shell Project ==="
           PROJECT_NAME_FOR_CREATE=$(echo "$DESIRED_PACKAGE_NAME" | awk -F. '{print $NF}')
           ORG_FOR_CREATE=$(echo "$DESIRED_PACKAGE_NAME" | sed "s/\.$PROJECT_NAME_FOR_CREATE$//")
-          echo "Creating a new Flutter shell project in $TEMP_BUILD_DIR (Org: $ORG_FOR_CREATE, Name: $PROJECT_NAME_FOR_CREATE)..."
+          echo "Derived for flutter create: Org='$ORG_FOR_CREATE', ProjectName='$PROJECT_NAME_FOR_CREATE'" # Debugging
           flutter create --org "$ORG_FOR_CREATE" --project-name "$PROJECT_NAME_FOR_CREATE" --platforms=android -a kotlin -i swift "$TEMP_BUILD_DIR"
           if [ $? -ne 0 ]; then
             echo "::error::Failed to run 'flutter create' for the shell project."
             exit 1
           fi
           
-          cd "$TEMP_BUILD_DIR" # IMPORTANT: Change into the new shell project directory
-          echo "Current directory after cd: $(pwd)" # Should be .../temp_flutter_build_shell
+          cd "$TEMP_BUILD_DIR"
+          echo "Current directory after cd: $(pwd)"
 
           echo "=== Phase 4: Copying User Project Files into Shell ==="
-          echo "Copying files from source '$ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY' to current directory '$(pwd)'"
-
-          # pubspec.yaml (CRITICAL)
           PUBSPEC_SOURCE_PATH_FOR_COPY="$ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY/pubspec.yaml"
-          echo "Debug: Attempting to copy pubspec.yaml from: $PUBSPEC_SOURCE_PATH_FOR_COPY"
           if [ -f "$PUBSPEC_SOURCE_PATH_FOR_COPY" ]; then
             cp -f "$PUBSPEC_SOURCE_PATH_FOR_COPY" ./pubspec.yaml
-            echo "Debug: Copied pubspec.yaml."
           else
-            echo "::error::CRITICAL - pubspec.yaml not found at resolved source path: $PUBSPEC_SOURCE_PATH_FOR_COPY"
-            echo "Debug: Listing contents of $ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY (if it exists and is accessible):"
-            ls -la "$ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY/" || echo "Debug: Directory $ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY not found or not accessible from $(pwd)."
+            echo "::error::CRITICAL - pubspec.yaml not found at resolved source: $PUBSPEC_SOURCE_PATH_FOR_COPY"
             exit 1
           fi
-
-          # lib directory (CRITICAL)
           LIB_SOURCE_PATH_FOR_COPY="$ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY/lib"
-          echo "Debug: Attempting to copy lib/ from: $LIB_SOURCE_PATH_FOR_COPY"
           if [ -d "$LIB_SOURCE_PATH_FOR_COPY" ]; then
-            rm -rf ./lib/ # Remove default lib
+            rm -rf ./lib/
             cp -R "$LIB_SOURCE_PATH_FOR_COPY" ./lib
-            echo "Debug: Copied lib/ directory."
           else
-            echo "::error::CRITICAL - lib/ directory not found at resolved source path: $LIB_SOURCE_PATH_FOR_COPY"
+            echo "::error::CRITICAL - lib/ directory not found at resolved source: $LIB_SOURCE_PATH_FOR_COPY"
             exit 1
           fi
-
-          # assets directory
-          ASSETS_SOURCE_PATH_FOR_COPY="$ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY/assets"
-          if [ -d "$ASSETS_SOURCE_PATH_FOR_COPY" ]; then
-            echo "Debug: Copying assets/ from: $ASSETS_SOURCE_PATH_FOR_COPY"
-            mkdir -p ./assets
-            cp -R "$ASSETS_SOURCE_PATH_FOR_COPY/."* ./assets/ 2>/dev/null || true 
-            cp -R "$ASSETS_SOURCE_PATH_FOR_COPY/"* ./assets/ 2>/dev/null || true
-            echo "Debug: Copied assets/ directory."
-          else
-            echo "Debug: assets/ directory not found at source, skipping."
-          fi
-
-          # fonts directory
-          FONTS_SOURCE_PATH_FOR_COPY="$ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY/fonts"
-          if [ -d "$FONTS_SOURCE_PATH_FOR_COPY" ];then
-            echo "Debug: Copying fonts/ from: $FONTS_SOURCE_PATH_FOR_COPY"
-            mkdir -p ./fonts
-            cp -R "$FONTS_SOURCE_PATH_FOR_COPY/."* ./fonts/ 2>/dev/null || true
-            cp -R "$FONTS_SOURCE_PATH_FOR_COPY/"* ./fonts/ 2>/dev/null || true
-            echo "Debug: Copied fonts/ directory."
-          else
-            echo "Debug: fonts/ directory not found at source, skipping."
-          fi
+          # Copy assets, fonts, analysis_options.yaml (with checks)
+          for item in assets fonts analysis_options.yaml; do
+            SOURCE_ITEM_PATH="$ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY/$item"
+            if [ -e "$SOURCE_ITEM_PATH" ]; then # Check if file or directory exists
+              echo "Copying $item from $SOURCE_ITEM_PATH..."
+              if [ -d "$SOURCE_ITEM_PATH" ]; then
+                mkdir -p "./$item"
+                cp -R "$SOURCE_ITEM_PATH/."* "./$item/" 2>/dev/null || true 
+                cp -R "$SOURCE_ITEM_PATH/"* "./$item/" 2>/dev/null || true
+              elif [ -f "$SOURCE_ITEM_PATH" ]; then
+                cp -f "$SOURCE_ITEM_PATH" "./$item"
+              fi
+            else
+              echo "Debug: Optional item '$item' not found at source, skipping."
+            fi
+          done
           
-          # analysis_options.yaml
-          ANALYSIS_SOURCE_PATH_FOR_COPY="$ACTUAL_PROJECT_SOURCE_DIR_REL_FOR_COPY/analysis_options.yaml"
-          if [ -f "$ANALYSIS_SOURCE_PATH_FOR_COPY" ]; then
-            echo "Debug: Copying analysis_options.yaml from: $ANALYSIS_SOURCE_PATH_FOR_COPY"
-            cp -f "$ANALYSIS_SOURCE_PATH_FOR_COPY" ./analysis_options.yaml
-          else
-            echo "Debug: analysis_options.yaml not found at source, skipping."
-          fi
-
           echo "=== Phase 5: Running flutter pub get ==="
           flutter pub get
           if [ $? -ne 0 ]; then
-            echo "::error::Failed to run 'flutter pub get' after copying project files."
+            echo "::error::Failed to run 'flutter pub get'."
             exit 1
           fi
 
-          echo "=== Phase 6: Applying Final Customizations (App Name, Icon) ==="
-          # App Name in AndroidManifest.xml
+          echo "=== Phase 6: Applying Final Customizations (App Name, Icon, Package ID Check) ==="
           MANIFEST_FILE="android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST_FILE" ]; then
             echo "Ensuring app name is '$APP_NAME' in $MANIFEST_FILE"
@@ -218,17 +164,12 @@ jobs:
             if ! grep -q "android:label=\"$APP_NAME\"" $MANIFEST_FILE ; then
                 sed -i.bak2 -E "s|(<activity[^>]*android:name=\".MainActivity\"[^>]*android:label=\")[^\"]*(\"[^>]*>)|\\1$APP_NAME\\2|g" "$MANIFEST_FILE"
             fi
-            if grep "android:label=\"$APP_NAME\"" "$MANIFEST_FILE"; then
-              echo "App name in Manifest updated/confirmed."
-            else
-              echo "::warning::Could not confirm app name '$APP_NAME' update in $MANIFEST_FILE."
-            fi
+            grep "android:label=\"$APP_NAME\"" "$MANIFEST_FILE" || echo "::warning::App name not confirmed in Manifest."
           else
-            echo "::error::$MANIFEST_FILE not found." # Should not happen
+            echo "::error::$MANIFEST_FILE not found."
             exit 1
           fi
 
-          # Launcher Icon
           ABSOLUTE_UPLOADED_ICON_PATH="${GITHUB_WORKSPACE}/${UPLOADED_ICON_PATH_FROM_ROOT}"
           if [ -f "$ABSOLUTE_UPLOADED_ICON_PATH" ]; then
             ICON_TARGET_BASE="android/app/src/main/res"
@@ -243,57 +184,61 @@ jobs:
             done
             echo "Launcher icons updated with $ABSOLUTE_UPLOADED_ICON_PATH."
           else
-            echo "::warning::Icon file '$ABSOLUTE_UPLOADED_ICON_PATH' (from '$UPLOADED_ICON_PATH_FROM_ROOT') not found. Skipping icon replacement."
+            echo "::warning::Icon file '$ABSOLUTE_UPLOADED_ICON_PATH' not found. Skipping."
           fi
           
-          # Verify applicationId in build.gradle
+          # --- MODIFIED PACKAGE ID CHECK ---
+          echo "--- DEBUG: Verifying applicationId in android/app/build.gradle ---"
           BUILD_GRADLE_FILE="android/app/build.gradle"
-          if grep "applicationId \"$DESIRED_PACKAGE_NAME\"" "$BUILD_GRADLE_FILE"; then
+          if [ ! -f "$BUILD_GRADLE_FILE" ]; then
+             echo "::error::CRITICAL - $BUILD_GRADLE_FILE not found after flutter create!"
+             exit 1
+          fi
+          echo "Expected applicationId: '$DESIRED_PACKAGE_NAME'"
+          echo "Actual defaultConfig block from $BUILD_GRADLE_FILE:"
+          sed -n '/defaultConfig {/,/}/p' "$BUILD_GRADLE_FILE" # Print the block for debugging
+
+          # Use a more flexible grep and check its exit status
+          # This looks for: applicationId<optional_spaces>"<YOUR_PACKAGE_NAME>"
+          if grep -q -E "applicationId\s*\"$DESIRED_PACKAGE_NAME\"" "$BUILD_GRADLE_FILE"; then
             echo "Package name (applicationId) in build.gradle confirmed: $DESIRED_PACKAGE_NAME"
           else
-            echo "::error::Desired package name $DESIRED_PACKAGE_NAME not found as applicationId in $BUILD_GRADLE_FILE."
-            exit 1
+            echo "::error::Desired package name '$DESIRED_PACKAGE_NAME' NOT FOUND as applicationId in $BUILD_GRADLE_FILE (see block above)."
+            exit 1 # Fail the job
           fi
+          # --- END MODIFIED PACKAGE ID CHECK ---
 
-          echo "::set-output name=project_path::$(pwd)" # $(pwd) is currently $GITHUB_WORKSPACE/$TEMP_BUILD_DIR
-          cd "$GITHUB_WORKSPACE" # Navigate back to GITHUB_WORKSPACE root
-          echo "Project preparation and customization complete. Buildable project is in $(pwd)/$TEMP_BUILD_DIR"
+          echo "::set-output name=project_path::$(pwd)"
+          cd "$GITHUB_WORKSPACE"
+          echo "Project preparation and customization complete."
 
-      - name: Setup Rust toolchain
+      - name: Setup Rust toolchain # Keep this, as plugins might still need Rust
         uses: dtolnay/rust-toolchain@stable
-        # You might need to try specific versions if 'stable' doesn't work immediately
+        # If Rust issues reappear, uncomment and experiment with toolchain versions:
         # with:
-        #   toolchain: '1.72' # Example specific version
+        #   toolchain: '1.72.0' # Example
 
       - name: Build APK
         run: |
-          PROJECT_TO_BUILD="${{ steps.prepare_project.outputs.project_path }}" # This is an absolute path
+          PROJECT_TO_BUILD="${{ steps.prepare_project.outputs.project_path }}"
           echo "Building APK in $PROJECT_TO_BUILD..."
-          cd "$PROJECT_TO_BUILD" # Change into the prepared project directory
-          flutter clean # Good practice before a release build
-          flutter build apk --release --no-shrink # --no-shrink can help if R8 causes issues initially
+          cd "$PROJECT_TO_BUILD"
+          flutter clean
+          flutter build apk --release --no-shrink
           if [ $? -ne 0 ]; then
             echo "::error::Flutter build APK failed."
-            # Helpful to see what's (or not) in the output dir
-            echo "Listing contents of build/app/outputs/flutter-apk/ (if exists):"
-            ls -R build/app/outputs/flutter-apk/ || true
-            echo "Listing contents of build/app/outputs/apk/release/ (if exists):"
-            ls -R build/app/outputs/apk/release/ || true
             exit 1
           fi
-          cd "$GITHUB_WORKSPACE" # Back to repository root for next steps
+          cd "$GITHUB_WORKSPACE"
           echo "APK build successful."
 
       - name: Move APK to builds folder and Set Output
         id: move_apk
         run: |
-          PROJECT_BUILT_PATH="${{ steps.prepare_project.outputs.project_path }}" # Absolute path to .../temp_flutter_build_shell
-          
-          # Create a sanitized app name for the APK filename
+          PROJECT_BUILT_PATH="${{ steps.prepare_project.outputs.project_path }}"
           DESIRED_APP_NAME_SLUG=$(echo "${{ github.event.inputs.app_name }}" | tr -s '[:space:]' '_' | tr -dc '[:alnum:]_.-')
-          APK_FILENAME="${DESIRED_APP_NAME_SLUG:-app}-run-${{ github.run_number }}.apk" # Removed 'release' for brevity
+          APK_FILENAME="${DESIRED_APP_NAME_SLUG:-app}-run-${{ github.run_number }}.apk"
           
-          # Define potential APK source paths within the $PROJECT_BUILT_PATH
           APK_SOURCE_PATH_PRIMARY="$PROJECT_BUILT_PATH/build/app/outputs/flutter-apk/app-release.apk"
           APK_SOURCE_PATH_ALTERNATIVE="$PROJECT_BUILT_PATH/build/app/outputs/apk/release/app-release.apk"
           ACTUAL_APK_SOURCE_PATH=""
@@ -303,64 +248,49 @@ jobs:
           elif [ -f "$APK_SOURCE_PATH_ALTERNATIVE" ]; then
             ACTUAL_APK_SOURCE_PATH="$APK_SOURCE_PATH_ALTERNATIVE"
           else
-            echo "::error::Release APK not found at expected paths after build."
-            echo "Searched for: $APK_SOURCE_PATH_PRIMARY"
-            echo "And for:      $APK_SOURCE_PATH_ALTERNATIVE"
-            echo "Contents of $PROJECT_BUILT_PATH/build/app/outputs/ :"
+            echo "::error::Release APK not found after build."
             ls -R "$PROJECT_BUILT_PATH/build/app/outputs/" || echo "Outputs directory not found."
             exit 1
           fi
           
-          # Destination path for the APK in the repository's 'builds' folder
-          DEST_APK_REPO_PATH="builds/$APK_FILENAME" # Relative to GITHUB_WORKSPACE
-
+          DEST_APK_REPO_PATH="builds/$APK_FILENAME"
           echo "Moving APK from $ACTUAL_APK_SOURCE_PATH to $GITHUB_WORKSPACE/$DEST_APK_REPO_PATH"
-          mkdir -p "$GITHUB_WORKSPACE/builds" # Ensure 'builds' directory exists at repo root
+          mkdir -p "$GITHUB_WORKSPACE/builds"
           mv "$ACTUAL_APK_SOURCE_PATH" "$GITHUB_WORKSPACE/$DEST_APK_REPO_PATH"
           if [ $? -ne 0 ]; then
             echo "::error::Failed to move APK."
             exit 1
           fi
           echo "APK moved to $DEST_APK_REPO_PATH"
-          
-          # Set outputs for the commit step (paths relative to GITHUB_WORKSPACE)
           echo "::set-output name=apk_path_in_repo::$DEST_APK_REPO_PATH"
           echo "::set-output name=apk_filename::$APK_FILENAME"
 
       - name: Commit and Push APK
         run: |
-          # Path from previous step's output, already relative to GITHUB_WORKSPACE
           APK_FILE_TO_COMMIT="${{ steps.move_apk.outputs.apk_path_in_repo }}"
           APK_NAME_FOR_COMMIT="${{ steps.move_apk.outputs.apk_filename }}"
-
           git config --global user.name 'GitHub Actions Bot'
-          git config --global user.email 'actions@github.com' # Common practice for bot email
-          
-          echo "Attempting to add $APK_FILE_TO_COMMIT to git staging area."
+          git config --global user.email 'actions@github.com'
           git add "$APK_FILE_TO_COMMIT"
-          
-          # Check if there are staged changes specifically for the APK
           if git diff --staged --quiet -- "$APK_FILE_TO_COMMIT"; then
-            echo "No changes to APK file '$APK_FILE_TO_COMMIT' or file not staged. Skipping commit."
-            # If the file should exist, this might indicate an issue.
-            if [ ! -f "$APK_FILE_TO_COMMIT" ]; then
-                echo "::error::APK file $APK_FILE_TO_COMMIT not found for commit. Move step might have failed."
-                exit 1
+            echo "No changes to APK file '$APK_FILE_TO_COMMIT' or file not staged."
+            if [ ! -f "$APK_FILE_TO_COMMIT" ]; then # Double check if file really exists
+                echo "::error::APK file $APK_FILE_TO_COMMIT not found for commit despite supposedly being moved."
+                exit 1 # Fail if the APK is missing, as it shouldn't be at this point
             fi
+            echo "Skipping commit as APK file has no changes or wasn't staged."
           else
             echo "Committing APK: $APK_NAME_FOR_COMMIT"
             git commit -m "feat: Add APK build for ${{ github.event.inputs.app_name }} - $APK_NAME_FOR_COMMIT (Run ${{ github.run_number }})"
-            
             echo "Pushing changes to the repository..."
             git push
             echo "APK committed and pushed."
           fi
 
       - name: Cleanup Temporary Dirs
-        if: always() # Always run cleanup, even if previous steps fail
+        if: always()
         run: |
           echo "Cleaning up temporary directories..."
-          # These directories were created at the GITHUB_WORKSPACE level
           if [ -d "$GITHUB_WORKSPACE/temp_project_sources" ]; then
             rm -rf "$GITHUB_WORKSPACE/temp_project_sources"
             echo "Removed $GITHUB_WORKSPACE/temp_project_sources"

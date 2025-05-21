@@ -38,7 +38,7 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.16.9' # Specify your desired Flutter version
-          # channel: 'stable' # Or specify a channel
+          channel: 'stable' # Or specify a channel
 
       - name: Prepare and Customize Project
         id: prepare_project
@@ -258,6 +258,12 @@ jobs:
           echo "::set-output name=project_path::$(pwd)" # $(pwd) is currently $GITHUB_WORKSPACE/$TEMP_BUILD_DIR
           cd "$GITHUB_WORKSPACE" # Navigate back to GITHUB_WORKSPACE root
           echo "Project preparation and customization complete. Buildable project is in $(pwd)/$TEMP_BUILD_DIR"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        # You might need to try specific versions if 'stable' doesn't work immediately
+        # with:
+        #   toolchain: '1.72' # Example specific version
 
       - name: Build APK
         run: |
